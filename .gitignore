@@ -1,0 +1,18 @@
+# Results and logs
+results/
+*.log
+
+# Docker volumes
+postgres_data/
+
+# Environment files (optional - можете оставить .env.example)
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# OS files
+.DS_Store
+Thumbs.db

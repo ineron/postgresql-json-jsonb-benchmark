@@ -1,0 +1,102 @@
+name: postgresql-json-jsonb-benchmark
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: ${PG_DATABASE:-json_benchmark_db}
+      POSTGRES_USER: ${PG_USER:-benchmark_user}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-benchmark_pass_2024}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "${PG_PORT_LOCAL:-5433}:5432"  # Host:Container mapping
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - type: bind
+        source: ./init-db.sql
+        target: /docker-entrypoint-initdb.d/01-init.sql
+        read_only: true
+    command: >
+      postgres
+      -c shared_buffers=${PG_SHARED_BUFFERS:-512MB}
+      -c work_mem=${PG_WORK_MEM:-64MB}
+      -c maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-256MB}
+      -c max_parallel_workers_per_gather=${PG_MAX_PARALLEL_WORKERS:-4}
+      -c random_page_cost=1.1
+      -c effective_cache_size=1GB
+      -c log_statement=none
+      -c log_min_duration_statement=5000
+      -c fsync=off
+      -c synchronous_commit=off
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c max_wal_size=2GB
+      -c min_wal_size=1GB
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-benchmark_user} -d ${PG_DATABASE:-json_benchmark_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - benchmark_network
+
+  benchmark_runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.benchmark
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_DATABASE: ${PG_DATABASE:-json_benchmark_db}
+      PG_USER: ${PG_USER:-benchmark_user}
+      PG_PASSWORD: ${PG_PASSWORD:-benchmark_pass_2024}
+      BENCHMARK_RECORDS: ${BENCHMARK_RECORDS:-1000000}
+      BENCHMARK_OUTPUT_FILE: ${BENCHMARK_OUTPUT_FILE:-benchmark_results.json}
+    volumes:
+      - type: bind
+        source: ./results
+        target: /app/results
+      - type: bind
+        source: ./.env
+        target: /app/.env
+        read_only: true
+    working_dir: /app
+    profiles:
+      - benchmark
+    command: >
+      sh -c "
+        echo '🚀 Starting PostgreSQL JSON vs JSONB Benchmark...' &&
+        echo '=================================================' &&
+        echo 'Test Environment: Dell PowerEdge R450, 2x Intel Xeon Silver 4310 24/48 cores @ 2.1GHz' &&
+        echo 'Records to test: ${BENCHMARK_RECORDS:-1000000}' &&
+        echo 'Database: ${PG_DATABASE:-json_benchmark_db}' &&
+        echo 'Output file: ${BENCHMARK_OUTPUT_FILE:-benchmark_results.json}' &&
+        echo '=================================================' &&
+        echo 'DEBUG: Environment variables:' &&
+        echo 'PG_HOST='$PG_HOST &&
+        echo 'PG_PORT='$PG_PORT &&
+        echo 'PG_DATABASE='$PG_DATABASE &&
+        echo 'PG_USER='$PG_USER &&
+        echo '=================================================' &&
+        echo '' &&
+        echo 'Waiting for database to be fully ready...' &&
+        sleep 5 &&
+        python3 benchmark_runner.py --output /app/results/${BENCHMARK_OUTPUT_FILE:-benchmark_results.json} &&
+        echo '' &&
+        echo '✅ Benchmark completed! Check ./results/ folder for detailed results.'
+      "
+    networks:
+      - benchmark_network
+
+volumes:
+  postgres_data:
+    name: ${COMPOSE_PROJECT_NAME:-postgresql-json-jsonb-benchmark}_postgres_data
+
+networks:
+  benchmark_network:
+    name: ${COMPOSE_PROJECT_NAME:-postgresql-json-jsonb-benchmark}_network
+    driver: bridge
