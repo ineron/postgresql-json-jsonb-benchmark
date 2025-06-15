@@ -1,422 +1,204 @@
-# PostgreSQL JSON vs JSONB Performance Benchmark
+#!/bin/bash
 
-Comprehensive performance comparison between JSON and JSONB data types in PostgreSQL, tested on 1 million records.
+# PostgreSQL JSON vs JSONB Benchmark Runner
+# Usage: ./run.sh [options]
 
-## Test Environment
+set -e
 
-- **Server**: Dell PowerEdge R450
-- **CPU**: 2x Intel Xeon Silver 4310 (24/48 cores @ 2.1GHz)
-- **Database**: PostgreSQL 15+
-- **Records**: 1,000,000 test records with realistic nested JSON structure
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-## Key Findings
+# Default values
+RECORDS=1000000
+CLEAN=false
+QUICK=false
 
-### Insert Performance
-- **JSON**: 15% faster for bulk inserts
-- **JSONB**: Slower initial insert due to binary conversion
+# Function to print colored output
+print_info() {
+    echo -e "${BLUE}ℹ️  $1${NC}"
+}
 
-### Query Performance
-- **Simple queries**: JSONB 3.2x faster
-- **Complex conditions**: JSONB 4.1x faster  
-- **Array operations**: JSONB 2.8x faster
-- **Existence checks**: JSONB 5x faster
+print_success() {
+    echo -e "${GREEN}✅ $1${NC}"
+}
 
-### Storage Efficiency
-- **JSONB**: 18% smaller disk footprint
-- **Reason**: Key deduplication and binary format
+print_warning() {
+    echo -e "${YELLOW}⚠️  $1${NC}"
+}
 
-### Update Performance
-- **JSONB**: 40% faster for targeted field updates
-- **Advantage**: Native binary operations
+print_error() {
+    echo -e "${RED}❌ $1${NC}"
+}
 
-## Files
+# Function to show usage
+show_usage() {
+    echo "PostgreSQL JSON vs JSONB Benchmark"
+    echo "Usage: $0 [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  -r, --records NUM     Number of records to test (default: 1000000)"
+    echo "  -q, --quick          Quick test with 10,000 records"
+    echo "  -c, --clean          Clean up containers and volumes after test"
+    echo "  -h, --help           Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  $0                   # Run full benchmark with 1M records"
+    echo "  $0 --quick           # Quick test with 10K records"
+    echo "  $0 -r 500000         # Test with 500K records"
+    echo "  $0 --clean           # Run test and cleanup afterwards"
+}
 
-- `benchmark.sql` - Complete SQL benchmark script
-- `benchmark_runner.py` - Python automation script with detailed reporting
-- `README.md` - This documentation
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -r|--records)
+            RECORDS="$2"
+            shift 2
+            ;;
+        -q|--quick)
+            RECORDS=10000
+            QUICK=true
+            shift
+            ;;
+        -c|--clean)
+            CLEAN=true
+            shift
+            ;;
+        -h|--help)
+            show_usage
+            exit 0
+            ;;
+        *)
+            print_error "Unknown option: $1"
+            show_usage
+            exit 1
+            ;;
+    esac
+done
 
-## Quick Start
+# Check if Docker is running
+if ! docker info >/dev/null 2>&1; then
+    print_error "Docker is not running. Please start Docker first."
+    exit 1
+fi
 
-### 🚀 One-Command Setup (Recommended)
-```bash
-# Clone repository
-git clone your-repo-url
-cd postgresql-json-jsonb-benchmark
+# Check if docker compose is available (V2)
+if docker compose version >/dev/null 2>&1; then
+    DOCKER_COMPOSE="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+    DOCKER_COMPOSE="docker-compose"
+    print_warning "Using legacy docker-compose. Consider upgrading to Docker Compose V2"
+else
+    print_error "Neither 'docker compose' nor 'docker-compose' is available."
+    print_error "Please install Docker Compose: https://docs.docker.com/compose/install/"
+    exit 1
+fi
 
-# Run setup check (recommended first step)
-./setup-check.sh
+print_info "Using: $DOCKER_COMPOSE"
 
-# Run full benchmark (1M records)
-./run.sh
-
-# Quick test (10K records)
-./run.sh --quick
-
-# Custom record count
-./run.sh --records 500000
-
-# Run and cleanup afterwards
-./run.sh --clean
-```
-
-### 🛠️ Alternative with Makefile
-```bash
-# Setup and validate environment
-make setup
-
-# Run full benchmark
-make run
-
-# Quick test
-make quick
-
-# Show help
-make help
-```
-
-### 📋 Manual Setup
-
-#### 1. Configure Environment
-```bash
-# Copy and edit .env file
-cp .env.example .env
-# Edit .env with your preferred settings
-```
-
-#### 2. Run with Docker Compose V2
-```bash
-# Build and run (recommended)
-docker compose --profile benchmark up --build
-
-# Run only database for manual testing
-docker compose up postgres
-
-# View logs
-docker compose logs -f benchmark_runner
-
-# Cleanup
-docker compose down -v
-```
-
-#### 2b. Legacy Docker Compose V1
-```bash
-# For older docker-compose installations
-docker-compose up --build
-docker-compose logs -f benchmark_runner
-docker-compose down -v
-```
-
-#### 3. Native Python (Advanced)
-```bash
-# Install dependencies
-pip install psycopg2-binary python-dotenv
-
-# Setup PostgreSQL manually
-createdb json_benchmark_db
-
-# Run benchmark
-python benchmark_runner.py
-```
-
-## Configuration
-
-All settings are configured via `.env` file:
-
-```bash
-# PostgreSQL Connection (for local development)
+# Create .env file if it doesn't exist
+if [ ! -f .env ]; then
+    print_warning ".env file not found. Creating default .env file..."
+    cat > .env << EOF
+# PostgreSQL Connection Settings
 PG_HOST=localhost
-PG_PORT=5433  # Docker maps container 5432 to host 5433
+PG_PORT=5432
 PG_DATABASE=json_benchmark_db
 PG_USER=benchmark_user
 PG_PASSWORD=benchmark_pass_2024
 
 # Benchmark Settings
-BENCHMARK_RECORDS=1000000
+BENCHMARK_RECORDS=$RECORDS
 BENCHMARK_OUTPUT_FILE=benchmark_results.json
-```
 
-### Port Configuration
+# Docker Settings
+POSTGRES_VERSION=15
+EOF
+    print_success "Created .env file with default settings"
+else
+    # Update BENCHMARK_RECORDS in existing .env file
+    if grep -q "BENCHMARK_RECORDS=" .env; then
+        sed -i "s/BENCHMARK_RECORDS=.*/BENCHMARK_RECORDS=$RECORDS/" .env
+    else
+        echo "BENCHMARK_RECORDS=$RECORDS" >> .env
+    fi
+fi
 
-- **Docker PostgreSQL**: Available on `localhost:5433` from host
-- **Container-to-container**: Uses `postgres:5432` internally
-- **Avoids conflicts**: With existing PostgreSQL on host port 5432
+# Create results directory
+mkdir -p results
 
-### Database Access
+print_info "Starting PostgreSQL JSON vs JSONB Benchmark"
+echo "=============================================="
+print_info "Records to test: $(printf "%'d" $RECORDS)"
+if [ "$QUICK" = true ]; then
+    print_info "Mode: Quick test"
+else
+    print_info "Mode: Full benchmark"
+fi
+print_info "Results will be saved to: ./results/"
+echo ""
 
-```bash
-# From host machine
-psql -h localhost -p 5433 -U benchmark_user -d json_benchmark_db
+# Build and run the benchmark
+print_info "Building Docker containers..."
+if ! $DOCKER_COMPOSE build --quiet; then
+    print_error "Failed to build Docker containers"
+    exit 1
+fi
 
-# Or using Makefile
-make shell-local
+print_success "Docker containers built successfully"
+print_info "Starting benchmark... This may take several minutes."
+echo ""
 
-# From within containers
-make shell
-```
+# Run the benchmark with profile
+if $DOCKER_COMPOSE --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark_runner; then
+    print_success "Benchmark completed successfully!"
+    
+    # Show results summary if available
+    if [ -f "results/benchmark_results.json" ]; then
+        print_info "Results summary:"
+        if command -v python3 >/dev/null 2>&1; then
+            python3 -c "
+import json
+import sys
+try:
+    with open('results/benchmark_results.json', 'r') as f:
+        data = json.load(f)
+    
+    insert = data.get('insert_performance', {})
+    if insert:
+        print(f\"📊 INSERT (1M records):\"
+        print(f\"   JSON:  {insert.get('json_time_seconds', 0)}s\"
+        print(f\"   JSONB: {insert.get('jsonb_time_seconds', 0)}s\"
+    
+    storage = data.get('storage_sizes', {})
+    if storage:
+        json_size = storage.get('json', {}).get('total_size_mb', 0)
+        jsonb_size = storage.get('jsonb', {}).get('total_size_mb', 0)
+        print(f\"💾 Storage sizes:\"
+        print(f\"   JSON:  {json_size} MB\"
+        print(f\"   JSONB: {jsonb_size} MB\"
+        
+    print(f\"📁 Full results: ./results/benchmark_results.json\"
+except Exception as e:
+    print(f\"Could not parse results: {e}\"
+" 2>/dev/null || print_info "Full results available in ./results/benchmark_results.json"
+        fi
+    fi
+else
+    print_error "Benchmark failed!"
+    exit 1
+fi
 
-## Test Data Structure
+# Cleanup if requested
+if [ "$CLEAN" = true ]; then
+    print_info "Cleaning up Docker containers and volumes..."
+    $DOCKER_COMPOSE down -v
+    print_success "Cleanup completed"
+fi
 
-Each test record contains realistic nested JSON with:
-- User profile information
-- Nested preferences object
-- Array of orders
-- Metadata with timestamps and system info
-
-```json
-{
-  "user_id": 12345,
-  "username": "user_12345",
-  "profile": {
-    "name": "User 12345",
-    "age": 25,
-    "city": "City_45",
-    "preferences": {
-      "theme": "dark",
-      "language": "en",
-      "notifications": true
-    }
-  },
-  "orders": [
-    {"id": 24690, "amount": 245, "status": "completed"},
-    {"id": 24691, "amount": 45, "status": "pending"}
-  ],
-  "metadata": {
-    "last_login": "2024-12-15",
-    "ip_address": "192.168.1.45",
-    "user_agent": "Browser_5"
-  }
-}
-```
-
-## Benchmark Tests
-
-### 1. Insert Performance
-- Bulk insert of 1M records
-- Measures raw insertion speed
-- Tests both data types with identical data
-
-### 2. Storage Analysis
-- Total table size comparison
-- Data-only size (excluding indexes)
-- Storage efficiency ratio
-
-### 3. Query Performance Tests
-
-#### Simple Key Extraction
-```sql
-WHERE data->>'user_id' = '12345'
-```
-
-#### Nested Field Access
-```sql
-WHERE data->'profile'->>'city' = 'City_50'
-```
-
-#### Array Operations
-```sql
-WHERE (data->'orders'->0)->>'status' = 'completed'
-```
-
-#### Existence Checks
-```sql
-WHERE data->'profile'->'preferences' ? 'notifications'
-```
-
-#### Complex Multi-field Conditions
-```sql
-WHERE (data->>'user_id')::int > 500000 
-  AND (data->'profile'->>'age')::int < 30
-  AND data->'profile'->'preferences'->>'theme' = 'dark'
-```
-
-#### Path-based Queries
-```sql
-WHERE data #>> '{profile,name}' LIKE 'User 1%'
-```
-
-#### Containment Queries (JSONB only)
-```sql
-WHERE data @> '{"profile": {"preferences": {"theme": "dark"}}}'
-```
-
-### 4. Update Performance
-- Targeted field updates using `jsonb_set()`
-- Measures modification speed for nested values
-- Tests 1,000 record updates
-
-### 5. Aggregation Performance
-- GROUP BY operations on JSON fields
-- COUNT and AVG calculations
-- Complex analytical queries
-
-## Expected Results
-
-Based on our testing, you should see:
-
-| Operation | JSON Performance | JSONB Performance | Winner |
-|-----------|------------------|-------------------|---------|
-| **Insert** | ~15% faster | Baseline | JSON |
-| **Simple Queries** | Baseline | ~3.2x faster | JSONB |
-| **Complex Queries** | Baseline | ~4.1x faster | JSONB |
-| **Array Operations** | Baseline | ~2.8x faster | JSONB |
-| **Existence Checks** | Baseline | ~5x faster | JSONB |
-| **Updates** | Baseline | ~40% faster | JSONB |
-| **Storage Size** | Baseline | ~18% smaller | JSONB |
-
-## When to Use Each Type
-
-### Use JSON when:
-- Heavy write workloads with minimal reads
-- Temporary data processing
-- Simple storage without complex queries
-- Exact text preservation is required
-
-### Use JSONB when:
-- Read-heavy workloads (most applications)
-- Complex queries and filtering
-- Performance-critical applications
-- Need for specialized JSON operators
-- Storage efficiency matters
-
-## JSONB Advantages
-
-1. **Binary Format**: Pre-parsed for faster operations
-2. **GIN Indexes**: Efficient indexing for complex queries
-3. **Specialized Operators**: `@>`, `?`, `?&`, `?|` for advanced operations
-4. **Storage Efficiency**: Key deduplication and compression
-5. **Update Performance**: Native binary operations
-
-## Requirements
-
-- PostgreSQL 9.4+ (for JSONB support)
-- Python 3.6+ (for automation script)
-- psycopg2 library for Python script
-
-## Running Custom Tests
-
-Modify the `generate_test_json()` function to test with your specific data structure:
-
-```sql
-CREATE OR REPLACE FUNCTION generate_test_json(i INTEGER)
-RETURNS TEXT AS $$
-BEGIN
-    -- Your custom JSON structure here
-    RETURN format('{"your": "data", "id": %s}', i);
-END;
-$$ LANGUAGE plpgsql;
-```
-
-## Performance Tuning
-
-For optimal results:
-
-1. **Increase shared_buffers**: `shared_buffers = 25% of RAM`
-2. **Tune work_mem**: `work_mem = 256MB` for complex queries
-3. **Enable parallel queries**: `max_parallel_workers_per_gather = 4`
-4. **Create appropriate indexes**:
-   ```sql
-   -- For JSONB
-   CREATE INDEX idx_jsonb_gin ON table_name USING GIN (jsonb_column);
-   
-   -- For specific paths
-   CREATE INDEX idx_jsonb_path ON table_name USING BTREE ((jsonb_column->>'field'));
-   ```
-
-## Troubleshooting
-
-### Common Issues
-
-#### 1. PostgreSQL Initialization Error
-```
-ERROR:  syntax error at or near "#!/"
-```
-**Solution**: Ensure `init-db.sql` contains only SQL commands, no shell scripts.
-
-#### 2. Docker Compose Not Found
-```
-docker-compose: command not found
-```
-**Solutions**:
-- Install Docker Compose V2: `docker compose version`
-- Or install legacy version: `pip install docker-compose`
-- Use setup check: `./setup-check.sh`
-
-#### 3. Permission Denied
-```
-permission denied: ./run.sh
-```
-**Solution**: Make scripts executable
-```bash
-chmod +x run.sh setup-check.sh
-```
-
-#### 4. Port Already in Use
-```
-port 5432 already in use
-```
-**Solutions**:
-- Change port in `.env`: `PG_PORT=5433`
-- Stop existing PostgreSQL: `sudo systemctl stop postgresql`
-- Use different compose project: `COMPOSE_PROJECT_NAME=benchmark2`
-
-#### 5. Out of Memory During Benchmark
-**Solutions**:
-- Reduce record count: `BENCHMARK_RECORDS=100000`
-- Adjust PostgreSQL settings in `.env`:
-  ```bash
-  PG_SHARED_BUFFERS=256MB
-  PG_WORK_MEM=32MB
-  ```
-
-#### 6. Slow Performance
-**Optimizations**:
-- Increase Docker memory allocation (Docker Desktop settings)
-- Use SSD storage for Docker volumes
-- Adjust PostgreSQL configuration in `docker-compose.yml`
-
-### Debug Commands
-
-```bash
-# Check Docker setup
-./setup-check.sh
-
-# View database logs
-docker compose logs postgres
-
-# View benchmark logs
-docker compose logs benchmark_runner
-
-# Connect to database
-make shell
-
-# Test configuration
-docker compose config
-
-# Start only database for manual testing
-make db-only
-```
-
-## Output Files
-
-The Python script generates:
-- `benchmark_results.json` - Detailed performance metrics
-- Console output with summary statistics
-- Execution plans for query analysis
-
-## Contributing
-
-Feel free to:
-- Add new test scenarios
-- Optimize existing queries
-- Test with different data patterns
-- Share results from different hardware configurations
-
-## License
-
-MIT License - feel free to use and modify for your testing needs.
-
-## Related Resources
-
-- [PostgreSQL JSON Documentation](https://www.postgresql.org/docs/current/datatype-json.html)
-- [JSON vs JSONB Official Comparison](https://www.postgresql.org/docs/current/datatype-json.html#JSON-INDEXING)
-- [GIN Index Documentation](https://www.postgresql.org/docs/current/gin.html)
+echo ""
+print_success "All done! 🎉"
